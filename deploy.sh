@@ -1,15 +1,22 @@
 #!/bin/bash
 
-# Script de deploy para produção
+# Script de deploy sem Docker
 set -e
 
 echo "🚀 Iniciando deploy do Infoplus Backend..."
 echo "📍 Ambiente: ${NODE_ENV:-production}"
 
-# Carregar variáveis de ambiente
+# Carregar variáveis de ambiente de forma segura
 if [ -f .env ]; then
     echo "📖 Carregando variáveis de ambiente..."
-    export $(cat .env | grep -v '^#' | xargs)
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ -n "$line" ] && [[ ! "$line" =~ ^[[:space:]]*# ]]; then
+            var_name=$(echo "$line" | cut -d '=' -f 1)
+            var_value=$(echo "$line" | cut -d '=' -f 2-)
+            var_value=$(echo "$var_value" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+            export "$var_name"="$var_value"
+        fi
+    done < .env
 fi
 
 # Verificar variáveis necessárias
@@ -17,8 +24,10 @@ required_vars=(
   "PAYSUITE_API_KEY"
   "PAYSUITE_WEBHOOK_SECRET"
   "FIREBASE_PROJECT_ID"
-  "FIREBASE_PRIVATE_KEY"
   "FIREBASE_CLIENT_EMAIL"
+  "PARSE_APP_ID"
+  "PARSE_JS_KEY"
+  "PARSE_SERVER_URL"
 )
 
 for var in "${required_vars[@]}"; do
@@ -30,69 +39,39 @@ done
 
 echo "✅ Variáveis de ambiente verificadas"
 
-# Build da imagem Docker
-echo "📦 Construindo imagem Docker..."
-docker build -t infoplus-backend:latest .
-
-# Parar container existente
-echo "🛑 Parando container existente..."
-docker stop infoplus-backend || true
-docker rm infoplus-backend || true
-
-# Executar novo container
-echo "🎯 Iniciando novo container..."
-docker run -d \
-  --name infoplus-backend \
-  --network host \
-  -p 3000:3000 \
-  -e NODE_ENV=production \
-  -e PORT=3000 \
-  -e PAYSUITE_API_KEY="$PAYSUITE_API_KEY" \
-  -e PAYSUITE_WEBHOOK_SECRET="$PAYSUITE_WEBHOOK_SECRET" \
-  -e PAYSUITE_BASE_URL="$PAYSUITE_BASE_URL" \
-  -e FIREBASE_PROJECT_ID="$FIREBASE_PROJECT_ID" \
-  -e FIREBASE_PRIVATE_KEY="$FIREBASE_PRIVATE_KEY" \
-  -e FIREBASE_PRIVATE_KEY_ID="$FIREBASE_PRIVATE_KEY_ID" \
-  -e FIREBASE_CLIENT_EMAIL="$FIREBASE_CLIENT_EMAIL" \
-  -e FIREBASE_CLIENT_ID="$FIREBASE_CLIENT_ID" \
-  -e FIREBASE_AUTH_URI="$FIREBASE_AUTH_URI" \
-  -e FIREBASE_TOKEN_URI="$FIREBASE_TOKEN_URI" \
-  -e FIREBASE_AUTH_PROVIDER_CERT_URL="$FIREBASE_AUTH_PROVIDER_CERT_URL" \
-  -e FIREBASE_CLIENT_CERT_URL="$FIREBASE_CLIENT_CERT_URL" \
-  -e FIREBASE_DATABASE_URL="$FIREBASE_DATABASE_URL" \
-  -e JWT_SECRET="$JWT_SECRET" \
-  -e CORS_ORIGIN="$CORS_ORIGIN" \
-  -e DEFAULT_PAYMENT_TIMEOUT="$DEFAULT_PAYMENT_TIMEOUT" \
-  -e MAX_RETRY_ATTEMPTS="$MAX_RETRY_ATTEMPTS" \
-  -e LOG_LEVEL="$LOG_LEVEL" \
-  --restart unless-stopped \
-  infoplus-backend:latest
-
-echo "⏳ Aguardando inicialização..."
-sleep 5
-
-# Verificar se o container está rodando
-if docker ps | grep -q "infoplus-backend"; then
-    echo "✅ Container iniciado com sucesso"
-else
-    echo "❌ Falha ao iniciar container"
-    docker logs infoplus-backend
-    exit 1
+# Parar instância antiga (se houver)
+if pgrep -f "node src/server.js" > /dev/null; then
+    echo "🛑 Parando instância antiga..."
+    pkill -f "node src/server.js" || true
 fi
+
+# Iniciar nova instância em background
+echo "🎯 Iniciando servidor..."
+nohup node src/server.js > backend.log 2>&1 &
+
+sleep 5
 
 # Verificar health check
 echo "🏥 Verificando health check..."
-health_response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || true)
+max_attempts=5
+attempt=1
 
-if [ "$health_response" = "200" ]; then
-    echo "✅ Health check passou"
-else
-    echo "❌ Health check falhou: HTTP $health_response"
-    docker logs infoplus-backend
-    exit 1
-fi
+while [ $attempt -le $max_attempts ]; do
+    health_response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || true)
+    if [ "$health_response" = "200" ]; then
+        echo "✅ Health check passou"
+        break
+    fi
+    echo "⏳ Tentativa $attempt de $max_attempts - Health check: HTTP $health_response"
+    if [ $attempt -eq $max_attempts ]; then
+        echo "❌ Health check falhou"
+        tail -n 50 backend.log
+        exit 1
+    fi
+    sleep 2
+    attempt=$((attempt + 1))
+done
 
 echo "🎉 Deploy concluído com sucesso!"
-echo "📊 Verifique os logs: docker logs -f infoplus-backend"
-echo "🌐 Health check: http://localhost:3000/health"
-echo "🔗 API: http://localhost:3000/"
+echo "📊 Logs: tail -f backend.log"
+echo "🌐 API: http://localhost:3000/"

@@ -1,0 +1,24 @@
+{
+  "appName": "infoplus-backend",
+  "cloud": "./cloud/main.js",
+  "appId": "e2Hjqf2YrwsnJz24RMp4Il9nw50rEYhy2C92ptNj",
+  "masterKey": "llkfdIzBpCUhPwQAdT7yMbcMXhlHed33HqzUYZMt",
+  "serverURL": "https://parseapi.back4app.com",
+  "databaseURI": "mongodb://localhost:27017/dev",
+  "liveQuery": {
+    "classNames": ["Payment", "User"]
+  },
+  "sessionLength": 525600,
+  "verifyUserEmails": false,
+  "emailVerifyTokenValidityDuration": 86400,
+  "accountLockout": {
+    "duration": 15,
+    "threshold": 3
+  },
+  "passwordPolicy": {
+    "validatorPattern": "^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.{8,})",
+    "doNotAllowUsername": true,
+    "maxPasswordAge": 90,
+    "maxPasswordHistory": 5
+  }
+}

@@ -1,5 +1,15 @@
 require('dotenv').config();
 const { initializeFirebase, checkFirebaseConnection } = require('./config/firebaseConfig');
+const { initializeParse, testConnection } = require('./config/parseConfig');
+const ParseService = require('./services/parseService');
+// Verificar modo de operação
+if (process.env.SERVER_MODE === 'cloud') {
+  console.log('☁️  Modo Cloud Function - Iniciando Back4App');
+  require('../cloud/main.js');
+} else {
+  console.log('🚀 Modo Express - Iniciando servidor tradicional');
+  require('./server');
+}
 
 // Verificar variáveis de ambiente críticas
 const requiredEnvVars = [
@@ -7,7 +17,10 @@ const requiredEnvVars = [
   'PAYSUITE_WEBHOOK_SECRET',
   'FIREBASE_PROJECT_ID',
   'FIREBASE_PRIVATE_KEY',
-  'FIREBASE_CLIENT_EMAIL'
+  'FIREBASE_CLIENT_EMAIL',
+  'PARSE_APP_ID',
+  'PARSE_JS_KEY',
+  'PARSE_SERVER_URL'
 ];
 
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
@@ -26,15 +39,37 @@ try {
   process.exit(1);
 }
 
-// Verificar conexão com Firebase
+// Inicializar Parse/Back4App
+try {
+  initializeParse();
+  console.log('📡 Parse/Back4App inicializado');
+} catch (error) {
+  console.error('❌ Falha ao inicializar Parse:', error);
+  process.exit(1);
+}
+
+// Verificar conexões
 async function startupChecks() {
   try {
-    const isConnected = await checkFirebaseConnection();
-    if (!isConnected) {
+    console.log('🔍 Verificando conexões...');
+    
+    const [firebaseConnected, parseConnected] = await Promise.all([
+      checkFirebaseConnection(),
+      testConnection()
+    ]);
+    
+    if (!firebaseConnected) {
       throw new Error('Falha na conexão com Firebase');
     }
     
-    console.log('✅ Conexão com Firebase verificada');
+    if (!parseConnected) {
+      console.warn('⚠️  Conexão com Back4App falhou, mas o sistema continuará em modo fallback');
+    } else {
+      // Inicializar classes do Back4App
+      await ParseService.initializeClasses();
+    }
+    
+    console.log('✅ Verificações de startup concluídas');
     
     // Iniciar servidor após verificações
     const server = require('./server');

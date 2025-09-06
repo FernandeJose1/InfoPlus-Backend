@@ -1,6 +1,7 @@
 const admin = require('firebase-admin');
 const { sendPushNotification } = require('../utils/notificationUtils');
 const { validatePaymentData } = require('../utils/validationUtils');
+const ParseService = require('../services/parseService');
 const { 
   createPaymentRequest, 
   calculatePoints, 
@@ -111,8 +112,15 @@ async function createPayment(userId, paymentData) {
       metadata: paymentData.metadata || {}
     };
 
-    // Criar pagamento no Firestore
+    // ✅ SALVAR EM AMBOS: FIREBASE E BACK4APP
     await paymentRef.set(paymentRecord);
+    
+    try {
+      await ParseService.savePayment(paymentRecord);
+      console.log(`✅ Pagamento ${reference} salvo no Back4App`);
+    } catch (error) {
+      console.warn('⚠️  Aviso: Erro ao salvar no Back4App (não crítico):', error.message);
+    }
 
     // Iniciar pagamento na PaySuite
     const paymentResult = await createPaymentRequest({
@@ -197,6 +205,18 @@ async function handlePaymentSuccess(data, reference) {
 
   await paymentRef.update(updateData);
 
+  // ✅ ATUALIZAR NO BACK4APP TAMBÉM
+  try {
+    await ParseService.updatePaymentStatus(reference, 'completed', {
+      paysuiteId: data.id,
+      transactionId: data.transaction_id,
+      confirmedAt: new Date()
+    });
+    console.log(`✅ Pagamento ${reference} atualizado no Back4App`);
+  } catch (error) {
+    console.warn('⚠️  Aviso: Erro ao atualizar Back4App (não crítico):', error.message);
+  }
+
   // Adicionar pontos ao usuário se aplicável
   const pointsEarned = paymentData.pointsEarned || 0;
   const userId = paymentData.userId;
@@ -204,6 +224,21 @@ async function handlePaymentSuccess(data, reference) {
   if (userId && pointsEarned > 0) {
     await addUserPoints(userId, pointsEarned, reference);
     await createPointsRecord(userId, pointsEarned, reference);
+    
+    // ✅ ATUALIZAR PONTOS NO BACK4APP
+    try {
+      await ParseService.updateUserPoints(userId, pointsEarned);
+      await ParseService.savePointsRecord({
+        userId: userId,
+        points: pointsEarned,
+        origin: 'payment',
+        paymentReference: reference,
+        description: `Pontos ganhos por pagamento ${reference}`
+      });
+      console.log(`✅ Pontos do usuário ${userId} atualizados no Back4App`);
+    } catch (error) {
+      console.warn('⚠️  Aviso: Erro ao atualizar pontos no Back4App:', error.message);
+    }
   }
 
   // Enviar notificação push
@@ -228,6 +263,16 @@ async function handlePaymentFailed(data, reference) {
     raw_message: JSON.stringify(data),
     updated_at: admin.firestore.FieldValue.serverTimestamp()
   });
+
+  // ✅ ATUALIZAR NO BACK4APP
+  try {
+    await ParseService.updatePaymentStatus(reference, 'failed', {
+      errorMessage: data.error_message || 'Pagamento falhou',
+      failedAt: new Date()
+    });
+  } catch (error) {
+    console.warn('⚠️  Aviso: Erro ao atualizar Back4App:', error.message);
+  }
 
   const paymentDoc = await paymentRef.get();
   const paymentData = paymentDoc.data();
@@ -255,6 +300,15 @@ async function handlePaymentCancelled(data, reference) {
     updated_at: admin.firestore.FieldValue.serverTimestamp()
   });
 
+  // ✅ ATUALIZAR NO BACK4APP
+  try {
+    await ParseService.updatePaymentStatus(reference, 'cancelled', {
+      cancelledAt: new Date()
+    });
+  } catch (error) {
+    console.warn('⚠️  Aviso: Erro ao atualizar Back4App:', error.message);
+  }
+
   const paymentDoc = await paymentRef.get();
   const paymentData = paymentDoc.data();
   const userId = paymentData.userId;
@@ -280,6 +334,16 @@ async function handlePaymentExpired(data, reference) {
     raw_message: JSON.stringify(data),
     updated_at: admin.firestore.FieldValue.serverTimestamp()
   });
+
+  // ✅ ATUALIZAR NO BACK4APP
+  try {
+    await ParseService.updatePaymentStatus(reference, 'expired', {
+      errorMessage: 'Pagamento expirado',
+      expiredAt: new Date()
+    });
+  } catch (error) {
+    console.warn('⚠️  Aviso: Erro ao atualizar Back4App:', error.message);
+  }
 
   const paymentDoc = await paymentRef.get();
   const paymentData = paymentDoc.data();
@@ -376,27 +440,45 @@ async function getPaymentStatus(reference) {
 
 // Obter pagamentos do usuário
 async function getUserPayments(userId, limit = 20, page = 1) {
-  const db = admin.firestore();
-  const offset = (page - 1) * limit;
+  try {
+    // ✅ TENTAR PRIMEIRO NO BACK4APP
+    try {
+      const parsePayments = await ParseService.getUserPayments(userId, limit, page - 1);
+      if (parsePayments && parsePayments.length > 0) {
+        console.log(`✅ Pagamentos recuperados do Back4App para usuário ${userId}`);
+        return parsePayments;
+      }
+    } catch (error) {
+      console.warn('⚠️  Fallback para Firebase - Erro no Back4App:', error.message);
+    }
+    
+    // Fallback para Firebase
+    const db = admin.firestore();
+    const offset = (page - 1) * limit;
 
-  const paymentsRef = db.collection('payments')
-    .where('userId', '==', userId)
-    .orderBy('timestamp', 'desc')
-    .limit(limit)
-    .offset(offset);
+    const paymentsRef = db.collection('payments')
+      .where('userId', '==', userId)
+      .orderBy('timestamp', 'desc')
+      .limit(limit)
+      .offset(offset);
 
-  const snapshot = await paymentsRef.get();
-  
-  return snapshot.docs.map(doc => {
-    const data = doc.data();
-    return {
-      id: doc.id,
-      ...data,
-      timestamp: data.timestamp?.toDate(),
-      confirmed_at: data.confirmed_at?.toDate(),
-      cancelled_at: data.cancelled_at?.toDate()
-    };
-  });
+    const snapshot = await paymentsRef.get();
+    
+    return snapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        ...data,
+        timestamp: data.timestamp?.toDate(),
+        confirmed_at: data.confirmed_at?.toDate(),
+        cancelled_at: data.cancelled_at?.toDate()
+      };
+    });
+
+  } catch (error) {
+    console.error('❌ Erro ao buscar pagamentos:', error);
+    throw error;
+  }
 }
 
 // Cancelar pagamento
@@ -420,6 +502,15 @@ async function cancelPayment(reference) {
     cancelled_at: admin.firestore.FieldValue.serverTimestamp(),
     updated_at: admin.firestore.FieldValue.serverTimestamp()
   });
+
+  // ✅ ATUALIZAR NO BACK4APP
+  try {
+    await ParseService.updatePaymentStatus(reference, 'cancelled', {
+      cancelledAt: new Date()
+    });
+  } catch (error) {
+    console.warn('⚠️  Aviso: Erro ao atualizar Back4App:', error.message);
+  }
 
   return { success: true, reference };
 }
